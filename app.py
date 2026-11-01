@@ -1,4 +1,3 @@
-
 import streamlit as st
 import joblib
 import mysql.connector
@@ -6,6 +5,7 @@ import pandas as pd
 import hashlib
 import hmac
 import secrets
+import html as html_lib
 
 from pathlib import Path
 from datetime import datetime
@@ -21,25 +21,95 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# -------------------- Theme --------------------
+# -------------------- Theme state --------------------
 
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+if "theme" not in st.session_state:
+    st.session_state.theme = "dark"
 
-:root {
-  --bg: #0B0E14;
-  --panel: #121722;
-  --raised: #171D2B;
-  --border: #232B3A;
-  --text: #E7EBF0;
-  --muted: #8B96A5;
-  --blue: #5B8CFF;
-  --green: #34D399;
-  --yellow: #FBBF24;
-  --coral: #FB8A65;
-  --red: #F0475A;
+
+def toggle_theme():
+    st.session_state.theme = (
+        "light" if st.session_state.theme == "dark" else "dark"
+    )
+
+
+def theme_button(container=None):
+    """Render the dark/light toggle button."""
+    target = container if container is not None else st
+    is_dark = st.session_state.theme == "dark"
+    target.button(
+        "☀  Light mode" if is_dark else "🌙  Dark mode",
+        key="theme_toggle_" + ("main" if container is not None else "top"),
+        on_click=toggle_theme,
+        use_container_width=True,
+    )
+
+
+PALETTES = {
+    "dark": {
+        "scheme": "dark",
+        "bg": "#0B0E14",
+        "panel": "#121722",
+        "raised": "#171D2B",
+        "border": "#232B3A",
+        "text": "#E7EBF0",
+        "muted": "#8B96A5",
+        "blue": "#5B8CFF",
+        "blue-hover": "#4778EC",
+        "green": "#34D399",
+        "yellow": "#FBBF24",
+        "coral": "#FB8A65",
+        "red": "#F0475A",
+        "input": "#0E131D",
+        "brand-bg": "#1C2A47",
+        "brand-border": "#2B416B",
+        "status-bg": "#102820",
+        "status-border": "#1D4939",
+        "empty-bg": "#0E131D",
+        "empty-border": "#2A3447",
+        "footer": "#687486",
+        "row-alt": "#141A26",
+    },
+    "light": {
+        "scheme": "light",
+        "bg": "#F3F5F9",
+        "panel": "#FFFFFF",
+        "raised": "#F0F3F9",
+        "border": "#D9DFEA",
+        "text": "#141A26",
+        "muted": "#5E6B7D",
+        "blue": "#3B6FE8",
+        "blue-hover": "#2F5CCB",
+        "green": "#12946B",
+        "yellow": "#B7791F",
+        "coral": "#D9622B",
+        "red": "#D12F42",
+        "input": "#FFFFFF",
+        "brand-bg": "#E4ECFF",
+        "brand-border": "#BFD0FA",
+        "status-bg": "#E3F6EE",
+        "status-border": "#B5E5D0",
+        "empty-bg": "#F7F9FC",
+        "empty-border": "#C9D2E0",
+        "footer": "#7A8699",
+        "row-alt": "#F7F9FC",
+    },
 }
+
+
+def build_theme_vars(theme):
+    p = PALETTES[theme]
+    lines = [f"  color-scheme: {p['scheme']};"]
+    for key, value in p.items():
+        if key != "scheme":
+            lines.append(f"  --{key}: {value};")
+    return ":root {\n" + "\n".join(lines) + "\n}"
+
+
+# -------------------- Styles --------------------
+
+BASE_CSS = """
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 
 .stApp { background: var(--bg); color: var(--text); }
 html, body, [class*="css"] {
@@ -60,13 +130,29 @@ header[data-testid="stHeader"] { background: transparent; }
 
 section[data-testid="stSidebar"] { background: var(--panel); }
 
+div[data-testid="stWidgetLabel"] p,
+label[data-baseweb="checkbox"] span {
+  color: var(--text) !important;
+}
+
+div[data-testid="stCaptionContainer"],
+div[data-testid="stCaptionContainer"] p {
+  color: var(--muted) !important;
+}
+
 div[data-testid="stTextArea"] textarea,
 div[data-testid="stTextInput"] input {
-  background: #0E131D !important;
+  background: var(--input) !important;
   color: var(--text) !important;
   border: 1px solid var(--border) !important;
   border-radius: 12px !important;
   font-family: 'Inter', sans-serif !important;
+}
+
+div[data-testid="stTextArea"] textarea::placeholder,
+div[data-testid="stTextInput"] input::placeholder {
+  color: var(--muted) !important;
+  opacity: .8;
 }
 
 div[data-testid="stTextArea"] textarea:focus,
@@ -75,7 +161,17 @@ div[data-testid="stTextInput"] input:focus {
   box-shadow: 0 0 0 1px var(--blue) !important;
 }
 
-.stButton > button {
+div[data-testid="stForm"] {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+}
+
+button[data-baseweb="tab"] { color: var(--muted) !important; }
+button[data-baseweb="tab"][aria-selected="true"] { color: var(--text) !important; }
+
+.stButton > button,
+.stDownloadButton > button {
   border-radius: 10px;
   border: 1px solid var(--border);
   background: var(--raised);
@@ -85,9 +181,10 @@ div[data-testid="stTextInput"] input:focus {
   transition: all .15s ease;
 }
 
-.stButton > button:hover {
+.stButton > button:hover,
+.stDownloadButton > button:hover {
     border-color: var(--blue);
-    color: white;
+    color: var(--blue);
 }
 
 div.stButton > button[kind="primary"],
@@ -98,10 +195,17 @@ div[data-testid="stFormSubmitButton"] button[kind="primary"] {
 }
 
 div.stButton > button[kind="primary"]:hover {
-    background: #4778EC;
+    background: var(--blue-hover);
+    color: white;
 }
 
-div[data-testid="stAlert"] { border-radius: 10px; }
+div[data-testid="stAlert"] {
+  border-radius: 10px;
+  background: var(--raised);
+  border: 1px solid var(--border);
+}
+
+div[data-testid="stAlert"] p { color: var(--text) !important; }
 hr { border-color: var(--border) !important; }
 
 .topbar {
@@ -127,10 +231,10 @@ hr { border-color: var(--border) !important; }
   align-items:center;
   justify-content:center;
   border-radius:12px;
-  background:#1C2A47;
+  background:var(--brand-bg);
   color:var(--blue);
   font-size:22px;
-  border:1px solid #2B416B;
+  border:1px solid var(--brand-border);
 }
 
 .brand-title {
@@ -148,8 +252,8 @@ hr { border-color: var(--border) !important; }
 
 .status {
   color:var(--green);
-  background:#102820;
-  border:1px solid #1D4939;
+  background:var(--status-bg);
+  border:1px solid var(--status-border);
   border-radius:999px;
   padding:7px 11px;
   font-size:11px;
@@ -252,15 +356,76 @@ hr { border-color: var(--border) !important; }
 .empty-state {
   text-align:center;
   padding:38px 15px;
-  border:1px dashed #2A3447;
+  border:1px dashed var(--empty-border);
   border-radius:12px;
   color:var(--muted);
-  background:#0E131D;
+  background:var(--empty-bg);
 }
 
 .empty-icon {
     font-size:26px;
     margin-bottom:8px;
+}
+
+.table-wrap {
+  max-height: 440px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  margin-bottom: 14px;
+}
+
+table.tt {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+table.tt th {
+  position: sticky;
+  top: 0;
+  background: var(--raised);
+  color: var(--muted);
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-align: left;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+table.tt td {
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  vertical-align: top;
+}
+
+table.tt tr:nth-child(even) td { background: var(--row-alt); }
+table.tt tr:last-child td { border-bottom: none; }
+table.tt td.mono {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.pill {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.pill.on {
+  color: var(--green);
+  border-color: var(--status-border);
+  background: var(--status-bg);
 }
 
 @media (max-width: 700px) {
@@ -271,8 +436,16 @@ hr { border-color: var(--border) !important; }
   .panel { padding:16px; }
   .brand-title { font-size:19px; }
 }
-</style>
-""", unsafe_allow_html=True)
+"""
+
+st.markdown(
+    "<style>\n"
+    + build_theme_vars(st.session_state.theme)
+    + "\n"
+    + BASE_CSS
+    + "\n</style>",
+    unsafe_allow_html=True,
+)
 
 
 # -------------------- Database connection --------------------
@@ -347,9 +520,20 @@ def init_database():
                 department VARCHAR(150),
                 priority VARCHAR(100),
                 topic VARCHAR(150),
+                is_public BOOLEAN DEFAULT FALSE,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # Migration: add is_public to an existing tickets table.
+        # Existing tickets stay private (FALSE) by default.
+        try:
+            cur.execute(
+                "ALTER TABLE tickets ADD COLUMN is_public BOOLEAN DEFAULT FALSE"
+            )
+        except mysql.connector.Error as e:
+            if e.errno != 1060:  # 1060 = duplicate column, already migrated
+                raise
 
         conn.commit()
         cur.close()
@@ -470,7 +654,8 @@ def save_ticket(
     description,
     department,
     priority,
-    topic
+    topic,
+    is_public=False
 ):
 
     conn = db_connection()
@@ -486,16 +671,18 @@ def save_ticket(
                 ticket_description,
                 department,
                 priority,
-                topic
+                topic,
+                is_public
             )
-            VALUES (%s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s)
             """,
             (
                 user_id,
                 description,
                 department,
                 priority,
-                topic
+                topic,
+                bool(is_public)
             )
         )
 
@@ -528,6 +715,7 @@ def fetch_tickets(user_id, limit=50):
                 department,
                 priority,
                 topic,
+                is_public,
                 created_at
             FROM tickets
             WHERE user_id = %s
@@ -546,6 +734,58 @@ def fetch_tickets(user_id, limit=50):
             columns=[
                 "id",
                 "ticket_description",
+                "department",
+                "priority",
+                "topic",
+                "is_public",
+                "created_at"
+            ]
+        )
+
+    finally:
+        conn.close()
+
+
+# -------------------- Fetch community tickets --------------------
+
+def fetch_community_tickets(user_id, limit=100):
+
+    conn = db_connection()
+
+    try:
+        cur = conn.cursor(dictionary=True)
+
+        # Only public tickets from OTHER users.
+        # Descriptions and email addresses are never selected.
+        cur.execute(
+            """
+            SELECT
+                t.id,
+                u.name AS username,
+                t.department,
+                t.priority,
+                t.topic,
+                t.created_at
+            FROM tickets t
+            INNER JOIN users u
+                ON t.user_id = u.user_id
+            WHERE t.is_public = TRUE
+              AND t.user_id != %s
+            ORDER BY t.created_at DESC, t.id DESC
+            LIMIT %s
+            """,
+            (user_id, int(limit))
+        )
+
+        rows = cur.fetchall()
+
+        cur.close()
+
+        return pd.DataFrame(
+            rows,
+            columns=[
+                "id",
+                "username",
                 "department",
                 "priority",
                 "topic",
@@ -606,18 +846,70 @@ def priority_color(value):
     value = str(value).lower()
 
     if "critical" in value or "urgent" in value:
-        return "#F0475A"
+        return "var(--red)"
 
     if "high" in value:
-        return "#FB8A65"
+        return "var(--coral)"
 
     if "medium" in value or "normal" in value:
-        return "#FBBF24"
+        return "var(--yellow)"
 
     if "low" in value:
-        return "#34D399"
+        return "var(--green)"
 
-    return "#5B8CFF"
+    return "var(--blue)"
+
+
+# -------------------- HTML table helper (theme-aware) --------------------
+
+def esc(value):
+    return html_lib.escape("" if value is None else str(value))
+
+
+def render_table(df, columns, priority_col=None, mono_cols=(), pill_col=None):
+    """
+    Render a DataFrame as a themed HTML table.
+    columns: ordered list of (dataframe_column, header_label)
+    """
+
+    head = "".join(f"<th>{esc(label)}</th>" for _, label in columns)
+
+    body = ""
+
+    for _, row in df.iterrows():
+
+        cells = ""
+
+        for col, _label in columns:
+
+            value = row[col]
+
+            if col == priority_col:
+                cells += (
+                    f'<td><span class="result-dot" '
+                    f'style="background:{priority_color(value)}"></span>'
+                    f'{esc(value)}</td>'
+                )
+
+            elif col == pill_col:
+                on = bool(value)
+                cells += (
+                    f'<td><span class="pill {"on" if on else ""}">'
+                    f'{"PUBLIC" if on else "PRIVATE"}</span></td>'
+                )
+
+            elif col in mono_cols:
+                cells += f'<td class="mono">{esc(value)}</td>'
+
+            else:
+                cells += f"<td>{esc(value)}</td>"
+
+        body += f"<tr>{cells}</tr>"
+
+    return (
+        '<div class="table-wrap"><table class="tt">'
+        f"<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>"
+    )
 
 
 # -------------------- Database status --------------------
@@ -665,8 +957,13 @@ if not st.session_state.db_ready:
 
 if st.session_state.user is None:
 
+    _, theme_col = st.columns([5, 1])
+
+    with theme_col:
+        theme_button(theme_col)
+
     st.markdown("""
-    <div style="max-width:600px;margin:50px auto 25px;text-align:center;">
+    <div style="max-width:600px;margin:30px auto 25px;text-align:center;">
         <div style="font-size:38px;">✳</div>
         <div class="panel-title" style="font-size:30px;">
             Welcome to Triage
@@ -850,13 +1147,17 @@ if st.session_state.user is None:
 
 user_id = st.session_state.user["user_id"]
 
-user_col, logout_col = st.columns([5, 1])
+user_col, theme_col, logout_col = st.columns([5, 1.2, 1])
 
 with user_col:
 
     st.markdown(
-        f"**Welcome, {st.session_state.user['name']}**"
+        f"**Welcome, {esc(st.session_state.user['name'])}**"
     )
+
+with theme_col:
+
+    theme_button(theme_col)
 
 with logout_col:
 
@@ -988,6 +1289,15 @@ with left:
         unsafe_allow_html=True,
     )
 
+    share_ticket = st.checkbox(
+        "Share this ticket with other users",
+        value=False,
+        help=(
+            "Other users can see your username, ticket ID, department, "
+            "priority and topic. Your ticket description remains private."
+        ),
+    )
+
     classify = st.button(
         "✦  Classify ticket",
         type="primary",
@@ -1039,7 +1349,8 @@ with left:
                     ticket.strip(),
                     dept,
                     pri,
-                    top
+                    top,
+                    share_ticket
                 )
 
                 result = {
@@ -1054,6 +1365,8 @@ with left:
 
                     "topic": top,
                     "topic_confidence": top_conf,
+
+                    "shared": share_ticket,
 
                     "time": datetime.now().strftime("%H:%M:%S"),
                 }
@@ -1071,6 +1384,7 @@ with left:
 
                 st.success(
                     f"Ticket #{ticket_id} classified and saved successfully!"
+                    + (" It is shared with the community." if share_ticket else "")
                 )
 
             except Exception as e:
@@ -1101,7 +1415,7 @@ with right:
         st.markdown("""
         <div class="empty-state">
           <div class="empty-icon">⌁</div>
-          <div style="font-family:'Space Grotesk',sans-serif;font-size:16px;color:#E7EBF0;margin-bottom:6px;">
+          <div style="font-family:'Space Grotesk',sans-serif;font-size:16px;color:var(--text);margin-bottom:6px;">
             Awaiting ticket
           </div>
           <div style="font-size:12px;">
@@ -1114,7 +1428,7 @@ with right:
 
         st.markdown(
             f'<div class="result-card"><div class="result-label">Department</div>'
-            f'<div class="result-value"><span class="result-dot" style="background:#5B8CFF"></span>{latest["department"]}</div></div>',
+            f'<div class="result-value"><span class="result-dot" style="background:var(--blue)"></span>{esc(latest["department"])}</div></div>',
             unsafe_allow_html=True,
         )
 
@@ -1124,13 +1438,13 @@ with right:
 
         st.markdown(
             f'<div class="result-card"><div class="result-label">Priority</div>'
-            f'<div class="result-value"><span class="result-dot" style="background:{pri_color}"></span>{latest["priority"]}</div></div>',
+            f'<div class="result-value"><span class="result-dot" style="background:{pri_color}"></span>{esc(latest["priority"])}</div></div>',
             unsafe_allow_html=True,
         )
 
         st.markdown(
             f'<div class="result-card"><div class="result-label">Topic</div>'
-            f'<div class="result-value"><span class="result-dot" style="background:#34D399"></span>{latest["topic"]}</div></div>',
+            f'<div class="result-value"><span class="result-dot" style="background:var(--green)"></span>{esc(latest["topic"])}</div></div>',
             unsafe_allow_html=True,
         )
 
@@ -1153,7 +1467,7 @@ with right:
             for name, conf in available:
 
                 st.markdown(
-                    f'<div class="small-muted" style="margin-top:10px;margin-bottom:5px;">{name} <span style="float:right;color:#E7EBF0;">{conf:.0%}</span></div>',
+                    f'<div class="small-muted" style="margin-top:10px;margin-bottom:5px;">{name} <span style="float:right;color:var(--text);">{conf:.0%}</span></div>',
                     unsafe_allow_html=True
                 )
 
@@ -1207,20 +1521,17 @@ else:
 
     for item in st.session_state.history:
 
-        preview = (
-            item["ticket"]
-            .replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-        )
+        preview = esc(item["ticket"])
 
         if len(preview) > 145:
             preview = preview[:142] + "..."
 
+        shared_tag = " &nbsp;·&nbsp; SHARED" if item.get("shared") else ""
+
         st.markdown(
             f'<div class="history-item"><div class="history-text">{preview}</div>'
-            f'<div class="history-meta">#{item.get("id", "-")} &nbsp;·&nbsp; {item["time"]} &nbsp;·&nbsp; DEPT: {item["department"]} '
-            f'&nbsp;·&nbsp; PRIORITY: {item["priority"]} &nbsp;·&nbsp; TOPIC: {item["topic"]}</div></div>',
+            f'<div class="history-meta">#{item.get("id", "-")} &nbsp;·&nbsp; {item["time"]} &nbsp;·&nbsp; DEPT: {esc(item["department"])} '
+            f'&nbsp;·&nbsp; PRIORITY: {esc(item["priority"])} &nbsp;·&nbsp; TOPIC: {esc(item["topic"])}{shared_tag}</div></div>',
             unsafe_allow_html=True,
         )
 
@@ -1233,7 +1544,7 @@ st.markdown("""
 <div class="panel-kicker">04 / My database records</div>
 <div class="panel-title">My saved tickets</div>
 <div class="panel-desc">
-    Your tickets permanently stored in TiDB Cloud.
+    Your tickets permanently stored in TiDB Cloud. Only you can see the full description.
 </div>
 """, unsafe_allow_html=True)
 
@@ -1254,26 +1565,31 @@ try:
             f"You have {len(saved_df)} recent saved tickets."
         )
 
-        display_df = saved_df.rename(
-            columns={
-                "id": "Ticket ID",
-                "ticket_description": "Description",
-                "department": "Department",
-                "priority": "Priority",
-                "topic": "Topic",
-                "created_at": "Created At",
-            }
+        st.markdown(
+            render_table(
+                saved_df,
+                columns=[
+                    ("id", "Ticket ID"),
+                    ("ticket_description", "Description"),
+                    ("department", "Department"),
+                    ("priority", "Priority"),
+                    ("topic", "Topic"),
+                    ("is_public", "Visibility"),
+                    ("created_at", "Created At"),
+                ],
+                priority_col="priority",
+                pill_col="is_public",
+                mono_cols=("id", "created_at"),
+            ),
+            unsafe_allow_html=True,
         )
 
-        st.dataframe(
-            display_df,
-            use_container_width=True,
-            hide_index=True
-        )
+        csv_df = saved_df.copy()
+        csv_df["is_public"] = csv_df["is_public"].astype(bool)
 
         st.download_button(
             "Download my ticket history (CSV)",
-            saved_df.to_csv(index=False).encode("utf-8"),
+            csv_df.to_csv(index=False).encode("utf-8"),
             "my_ticket_history.csv",
             "text/csv",
             use_container_width=True
@@ -1286,10 +1602,64 @@ except Exception as e:
     )
 
 
+# -------------------- Community Tickets --------------------
+
+st.markdown("---")
+
+st.markdown("""
+<div class="panel-kicker">05 / Community</div>
+<div class="panel-title">Community Tickets</div>
+<div class="panel-desc">
+    Public tickets shared by other registered users.
+    Descriptions and email addresses are never shown.
+</div>
+""", unsafe_allow_html=True)
+
+
+try:
+
+    community_df = fetch_community_tickets(user_id)
+
+    if community_df.empty:
+
+        st.info(
+            "No public tickets from other users yet."
+        )
+
+    else:
+
+        st.caption(
+            f"{len(community_df)} public tickets shared by other users."
+        )
+
+        st.markdown(
+            render_table(
+                community_df,
+                columns=[
+                    ("id", "Ticket ID"),
+                    ("username", "Raised By"),
+                    ("department", "Department"),
+                    ("priority", "Priority"),
+                    ("topic", "Topic"),
+                    ("created_at", "Shared At"),
+                ],
+                priority_col="priority",
+                mono_cols=("id", "created_at"),
+            ),
+            unsafe_allow_html=True,
+        )
+
+except Exception as e:
+
+    st.error(
+        f"Could not load community tickets: {e}"
+    )
+
+
 # -------------------- Footer --------------------
 
 st.markdown("""
-<div style="border-top:1px solid #232B3A;margin-top:28px;padding-top:14px;color:#687486;font-size:11px;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+<div style="border-top:1px solid var(--border);margin-top:28px;padding-top:14px;color:var(--footer);font-size:11px;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;">
   <span>TRIAGE · ML-POWERED TICKET CLASSIFICATION</span>
   <span>Department · Priority · Topic</span>
 </div>
