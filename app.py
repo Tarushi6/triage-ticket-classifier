@@ -1,5 +1,7 @@
 import streamlit as st
 import joblib
+import mysql.connector
+import pandas as pd
 from pathlib import Path
 from datetime import datetime
 
@@ -76,6 +78,11 @@ hr { border-color: var(--border) !important; }
   border-radius:999px; padding:7px 11px; font-size:11px; font-weight:700;
   letter-spacing:.5px; white-space:nowrap;
 }
+.status-error {
+  color:var(--red); background:#2A1216; border:1px solid #5A1F28;
+  border-radius:999px; padding:7px 11px; font-size:11px; font-weight:700;
+  letter-spacing:.5px; white-space:nowrap;
+}
 .panel {
   background:var(--panel); border:1px solid var(--border); border-radius:16px;
   padding:22px; min-height:100%;
@@ -146,8 +153,114 @@ def priority_color(value):
         return "#34D399"
     return "#5B8CFF"
 
+# -------------------- TiDB Cloud database --------------------
+def db_connection():
+    """Open a new connection to TiDB Cloud using Streamlit Secrets."""
+    if "mysql" not in st.secrets:
+        raise RuntimeError("Missing [mysql] settings in Streamlit Secrets.")
+    cfg = st.secrets["mysql"]
+
+    required = ["host", "port", "user", "password", "database"]
+    missing = [key for key in required if key not in cfg]
+    if missing:
+        raise RuntimeError("Missing database settings: " + ", ".join(missing))
+
+    args = {
+        "host": cfg["host"],
+        "port": int(cfg["port"]),
+        "user": cfg["user"],
+        "password": cfg["password"],
+        "database": cfg["database"],
+        "connection_timeout": 20,
+    }
+
+    # TiDB Cloud needs TLS. Point ssl_ca at the .pem file in the project root.
+    if cfg.get("ssl_ca"):
+        ca_path = Path(cfg["ssl_ca"])
+        if not ca_path.is_absolute():
+            ca_path = BASE_DIR / ca_path
+        if not ca_path.exists():
+            raise RuntimeError(f"SSL certificate file not found: {ca_path}")
+        args["ssl_ca"] = str(ca_path)
+        args["ssl_verify_cert"] = True
+
+    return mysql.connector.connect(**args)
+
+def init_database():
+    """Create the tickets table if it doesn't exist yet."""
+    conn = db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tickets (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                ticket_description TEXT NOT NULL,
+                department VARCHAR(100),
+                priority VARCHAR(50),
+                topic VARCHAR(100),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.commit()
+        cur.close()
+    finally:
+        conn.close()
+
+def save_ticket(description, department, priority, topic):
+    """Insert one classified ticket and return its new ID."""
+    conn = db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO tickets (ticket_description, department, priority, topic) "
+            "VALUES (%s, %s, %s, %s)",
+            (description, department, priority, topic),
+        )
+        conn.commit()
+        ticket_id = cur.lastrowid
+        cur.close()
+        return ticket_id
+    finally:
+        conn.close()
+
+def fetch_tickets(limit=50):
+    """Return the most recent saved tickets as a DataFrame."""
+    conn = db_connection()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute(
+            "SELECT id, ticket_description, department, priority, topic, created_at "
+            "FROM tickets ORDER BY created_at DESC, id DESC LIMIT %s",
+            (int(limit),),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        return pd.DataFrame(
+            rows,
+            columns=["id", "ticket_description", "department", "priority", "topic", "created_at"],
+        )
+    finally:
+        conn.close()
+
+# Run database setup once per session
+if "db_ready" not in st.session_state:
+    try:
+        init_database()
+        st.session_state.db_ready = True
+        st.session_state.db_error = ""
+    except Exception as e:
+        st.session_state.db_ready = False
+        st.session_state.db_error = str(e)
+
 # -------------------- Header --------------------
-st.markdown("""
+if st.session_state.get("db_ready", False):
+    status_html = '<div class="status">● &nbsp; CLASSIFIER READY</div>'
+else:
+    status_html = '<div class="status-error">● &nbsp; DATABASE OFFLINE</div>'
+
+st.markdown(f"""
 <div class="topbar">
   <div class="brand">
     <div class="brand-icon">✳</div>
@@ -156,9 +269,12 @@ st.markdown("""
       <div class="brand-sub">Ticket classification console</div>
     </div>
   </div>
-  <div class="status">● &nbsp; CLASSIFIER READY</div>
+  {status_html}
 </div>
 """, unsafe_allow_html=True)
+
+if not st.session_state.get("db_ready", False):
+    st.error(f"Database is not connected: {st.session_state.get('db_error', 'Unknown database error')}")
 
 # Session state
 if "history" not in st.session_state:
@@ -229,7 +345,22 @@ with left:
                 dept, dept_conf = predict_with_confidence(department_model, ticket.strip())
                 pri, pri_conf = predict_with_confidence(priority_model, ticket.strip())
                 top, top_conf = predict_with_confidence(topic_model, ticket.strip())
+
+                if not st.session_state.get("db_ready", False):
+                    raise RuntimeError(
+                        "Database is not connected: "
+                        + st.session_state.get("db_error", "Unknown database error")
+                    )
+
+                ticket_id = save_ticket(
+                    ticket.strip(),
+                    dept,
+                    pri,
+                    top,
+                )
+
                 result = {
+                    "id": ticket_id,
                     "ticket": ticket.strip(),
                     "department": dept, "department_confidence": dept_conf,
                     "priority": pri, "priority_confidence": pri_conf,
@@ -239,6 +370,7 @@ with left:
                 st.session_state.latest = result
                 st.session_state.history.insert(0, result)
                 st.session_state.history = st.session_state.history[:8]
+                st.success(f"Ticket #{ticket_id} classified and saved to database!")
             except Exception as e:
                 st.error(f"Prediction failed: {e}")
 
@@ -313,10 +445,42 @@ else:
             preview = preview[:142] + "..."
         st.markdown(
             f'<div class="history-item"><div class="history-text">{preview}</div>'
-            f'<div class="history-meta">{item["time"]} &nbsp;·&nbsp; DEPT: {item["department"]} '
+            f'<div class="history-meta">#{item.get("id", "-")} &nbsp;·&nbsp; {item["time"]} &nbsp;·&nbsp; DEPT: {item["department"]} '
             f'&nbsp;·&nbsp; PRIORITY: {item["priority"]} &nbsp;·&nbsp; TOPIC: {item["topic"]}</div></div>',
             unsafe_allow_html=True,
         )
+
+# -------------------- Permanent database history --------------------
+st.markdown("---")
+st.markdown("""
+<div class="panel-kicker">04 / Database records</div>
+<div class="panel-title">Saved ticket history</div>
+<div class="panel-desc">Tickets permanently stored in TiDB Cloud.</div>
+""", unsafe_allow_html=True)
+
+if st.session_state.get("db_ready", False):
+    try:
+        saved_df = fetch_tickets()
+        if saved_df.empty:
+            st.info("No tickets saved in the database yet.")
+        else:
+            st.caption(f"{len(saved_df)} most recent saved tickets")
+            st.dataframe(
+                saved_df.rename(columns={
+                    "id": "Ticket ID",
+                    "ticket_description": "Description",
+                    "department": "Department",
+                    "priority": "Priority",
+                    "topic": "Topic",
+                    "created_at": "Created At",
+                }),
+                use_container_width=True,
+                hide_index=True,
+            )
+    except Exception as e:
+        st.error(f"Could not load saved tickets: {e}")
+else:
+    st.warning("Database is not connected, so saved tickets cannot be shown.")
 
 st.markdown("""
 <div style="border-top:1px solid #232B3A;margin-top:28px;padding-top:14px;color:#687486;font-size:11px;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;">
